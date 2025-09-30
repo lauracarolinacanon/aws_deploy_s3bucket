@@ -5,7 +5,6 @@ terraform_aws/
 │   ├── locals.tf              # Locals
 │   ├── versions.tf            # Terraform + provider version
 │   ├── providers.tf           # Provider config
-│   ├── s3_bucket.tf           # Calls the S3 bucket module
 │   ├── dev/
 │   │   └── terraform-dev.tfvars   # Variables for dev environment
 │   ├── qa/
