@@ -1,75 +1,95 @@
-name: Terraform Deploy
+name: "Terraform action"
 
 on:
   push:
-    branches: [dev, qa, main]
-  workflow_dispatch:
+    branches: [main]
+  pull_request:
 
-concurrency:
-  group: terraform-${{ github.ref_name }}
-  cancel-in-progress: false
+permissions:
+  id-token: write          # required for AWS OIDC
+  contents: read           # required for checkout
+  pull-requests: write     # to comment the plan on PRs
+
+env:
+  TF_LOG: INFO
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  AWS_REGION: ${{ secrets.AWS_REGION }}
 
 jobs:
-  terraform:
+  deploy:
     runs-on: ubuntu-latest
     defaults:
       run:
         shell: bash
-        working-directory: manifests
-
-    # Needed for GitHub OIDC → AWS
-    permissions:
-      id-token: write
-      contents: read
-
-    env:
-      AWS_REGION: us-east-1         # 👈 set your region here
-      TF_IN_AUTOMATION: "true"
-      TF_INPUT: "false"
+        working-directory: .
 
     steps:
-      - name: Checkout repository
+      - name: Git checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS (OIDC)
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE }}     # full role ARN
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHub-OIDC-TERRAFORM
 
       - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+        uses: hashicorp/setup-terraform@v2
         with:
-          terraform_wrapper: false
+          terraform_version: 1.2.5   # keep your pinned version
 
+      - name: Terraform fmt
+        id: fmt
+        run: terraform fmt -check
+        continue-on-error: true
+
+      # LOCAL BACKEND (no S3 state yet) — this will create the bucket
       - name: Terraform Init
+        id: init
         run: terraform init -input=false
 
-      - name: Select tfvars by branch & Plan
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
         id: plan
-        run: |
-          case "${GITHUB_REF_NAME}" in
-            dev)  TFVARS="dev/terraform-dev.tfvars" ;;
-            qa)   TFVARS="qa/terraform-qa.tfvars" ;;
-            main) TFVARS="prod/terraform-prod.tfvars" ;;
-            *)    echo "Unsupported branch: ${GITHUB_REF_NAME}"; exit 1 ;;
-          esac
-          echo "TFVARS=$TFVARS" >> "$GITHUB_OUTPUT"
-          terraform validate -no-color
-          terraform plan -lock-timeout=5m -var-file="$TFVARS" -out=tfplan
+        run: terraform plan -no-color -out=tfplan
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
 
-      # Apply per environment (enable env protections in Repo Settings → Environments)
-      - name: Terraform Apply (dev)
-        if: ${{ github.ref_name == 'dev' }}
-        run: terraform apply -auto-approve tfplan
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const output = `#### Terraform Format 🖌 \`${{ steps.fmt.outcome }}\`
+            #### Init ⚙️ \`${{ steps.init.outcome }}\`
+            #### Validate 🤖 \`${{ steps.validate.outcome }}\`
+            #### Plan 📖 \`${{ steps.plan.outcome || 'skipped' }}\`
 
-      - name: Terraform Apply (qa)
-        if: ${{ github.ref_name == 'qa' }}
-        environment: qa
-        run: terraform apply -auto-approve tfplan
+            <details><summary>Show Plan</summary>
+            \`\`\`
+            ${process.env.PLAN || 'No plan output'}
+            \`\`\`
+            </details>`;
 
-      - name: Terraform Apply (prod)
-        if: ${{ github.ref_name == 'main' }}
-        environment: prod
-        run: terraform apply -auto-approve tfplan
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output
+            });
+
+      - name: Terraform Plan Status
+        if: github.event_name == 'pull_request' && steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Terraform Apply (main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: terraform apply -auto-approve -input=false
