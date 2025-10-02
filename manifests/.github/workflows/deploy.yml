@@ -36,5 +36,5 @@ jobs:
           fi
 
       - name: Terraform Apply
-        if: github.ref == 'refs/heads/main'
-        run: terraform -chdir=manifests apply -auto-approve -var-file="prod/terraform-prod.tfvars"
+        if: github.ref == 'refs/heads/dev'   # 🔹 cambiado de main a dev
+        run: terraform -chdir=manifests apply -auto-approve -var-file="dev/terraform-dev.tfvars"
