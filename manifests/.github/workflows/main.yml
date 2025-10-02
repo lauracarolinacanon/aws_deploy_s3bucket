@@ -1,0 +1,75 @@
+name: Terraform Deploy
+
+on:
+  push:
+    branches: [dev, qa, main]
+  workflow_dispatch:
+
+concurrency:
+  group: terraform-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: manifests
+
+    # Needed for GitHub OIDC → AWS
+    permissions:
+      id-token: write
+      contents: read
+
+    env:
+      AWS_REGION: us-east-1         # 👈 set your region here
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHub-OIDC-TERRAFORM
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Select tfvars by branch & Plan
+        id: plan
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            dev)  TFVARS="dev/terraform-dev.tfvars" ;;
+            qa)   TFVARS="qa/terraform-qa.tfvars" ;;
+            main) TFVARS="prod/terraform-prod.tfvars" ;;
+            *)    echo "Unsupported branch: ${GITHUB_REF_NAME}"; exit 1 ;;
+          esac
+          echo "TFVARS=$TFVARS" >> "$GITHUB_OUTPUT"
+          terraform validate -no-color
+          terraform plan -lock-timeout=5m -var-file="$TFVARS" -out=tfplan
+
+      # Apply per environment (enable env protections in Repo Settings → Environments)
+      - name: Terraform Apply (dev)
+        if: ${{ github.ref_name == 'dev' }}
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Apply (qa)
+        if: ${{ github.ref_name == 'qa' }}
+        environment: qa
+        run: terraform apply -auto-approve tfplan
+
+      - name: Terraform Apply (prod)
+        if: ${{ github.ref_name == 'main' }}
+        environment: prod
+        run: terraform apply -auto-approve tfplan
